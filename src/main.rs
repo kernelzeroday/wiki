@@ -19,6 +19,10 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// Disable pager (print directly to stdout)
+    #[arg(short = 'P', long, global = true)]
+    no_pager: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -75,7 +79,7 @@ async fn main() {
             cmd_summary(&client, &title.join(" "), cli.json).await
         }
         Some(Commands::Page { title, width }) => {
-            cmd_page(&client, &title.join(" "), width, cli.json).await
+            cmd_page(&client, &title.join(" "), width, cli.json, cli.no_pager).await
         }
         Some(Commands::Random) => cmd_random(&client, cli.json).await,
         Some(Commands::Completions { shell }) => {
@@ -88,7 +92,7 @@ async fn main() {
                 .map(|s| s.to_string_lossy())
                 .collect::<Vec<_>>()
                 .join(" ");
-            cmd_default(&client, &query, cli.json).await
+            cmd_default(&client, &query, cli.json, cli.no_pager).await
         }
         None => {
             let _ = Cli::command().print_help();
@@ -189,9 +193,10 @@ async fn cmd_default(
     client: &api::Client,
     query: &str,
     json: bool,
+    no_pager: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match client.summary_direct(query).await? {
-        Some(s) => show_page(client, &s, json).await,
+        Some(s) => show_page(client, &s, json, no_pager).await,
         None => cmd_search(client, query, 10, json).await,
     }
 }
@@ -201,15 +206,17 @@ async fn cmd_page(
     title: &str,
     _width: Option<usize>,
     json: bool,
+    no_pager: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let s = client.summary(title).await?;
-    show_page(client, &s, json).await
+    show_page(client, &s, json, no_pager).await
 }
 
 async fn show_page(
     client: &api::Client,
     summary: &api::Summary,
     json: bool,
+    no_pager: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let width = display::term_width();
     let html = client.page_html(&summary.title).await?;
@@ -238,7 +245,11 @@ async fn show_page(
         output.push_str(&format!("\n{}", u.dimmed()));
     }
 
-    display::paged_print(&output);
+    if no_pager {
+        print!("{output}");
+    } else {
+        display::paged_print(&output);
+    }
     Ok(())
 }
 
