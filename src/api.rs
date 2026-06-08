@@ -98,7 +98,7 @@ impl Client {
             .await
     }
 
-    async fn summary_direct(&self, title: &str) -> Result<Option<Summary>, reqwest::Error> {
+    pub async fn summary_direct(&self, title: &str) -> Result<Option<Summary>, reqwest::Error> {
         let encoded = urlencoding::encode(title);
         let url = format!("{}/api/rest_v1/page/summary/{encoded}", self.base());
         let resp = self.http.get(&url).send().await?;
