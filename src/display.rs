@@ -64,7 +64,7 @@ fn flatten_tables(text: &str) -> String {
             if prev_was_table {
                 result.push(String::new());
             }
-            result.push(line.to_string());
+            result.push(line.trim_end().to_string());
             prev_was_table = false;
         }
     }
@@ -230,9 +230,22 @@ pub fn paged_print(content: &str) {
     }
 }
 
-pub fn strip_search_highlight(text: &str) -> String {
-    text.replace("<span class=\"searchmatch\">", "")
-        .replace("</span>", "")
+pub fn clean_excerpt(text: &str) -> String {
+    let text = text
+        .replace("<span class=\"searchmatch\">", "")
+        .replace("</span>", "");
+    decode_html_entities(&text)
+}
+
+fn decode_html_entities(text: &str) -> String {
+    text.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#039;", "'")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&nbsp;", " ")
 }
 
 pub fn print_summary(title: &str, description: Option<&str>, extract: Option<&str>, url: Option<&str>) {
@@ -257,7 +270,7 @@ pub fn print_search_result(idx: usize, title: &str, description: Option<&str>, e
         println!("     {}", desc.dimmed());
     }
     if let Some(exc) = excerpt {
-        let clean = strip_search_highlight(exc);
+        let clean = clean_excerpt(exc);
         let oneline = clean.replace('\n', " ");
         let trimmed: String = oneline.chars().take(120).collect();
         println!("     {}", trimmed.dimmed());

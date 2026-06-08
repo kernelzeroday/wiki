@@ -137,7 +137,7 @@ async fn cmd_search(
                 serde_json::json!({
                     "title": p.title,
                     "description": p.description,
-                    "excerpt": p.excerpt.as_ref().map(|e| display::strip_search_highlight(e)),
+                    "excerpt": p.excerpt.as_ref().map(|e| display::clean_excerpt(e)),
                 })
             })
             .collect();
@@ -196,10 +196,20 @@ async fn cmd_default(
     no_pager: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match client.summary_direct(query).await? {
+        Some(s) if s.page_type.as_deref() == Some("disambiguation") => {
+            use colored::Colorize;
+            eprintln!(
+                "{}",
+                format!("\"{}\" is a disambiguation page, showing search results:\n", s.title)
+                    .dimmed()
+            );
+            cmd_search(client, query, 10, json).await
+        }
         Some(s) => show_page(client, &s, json, no_pager).await,
         None => cmd_search(client, query, 10, json).await,
     }
 }
+
 
 async fn cmd_page(
     client: &api::Client,

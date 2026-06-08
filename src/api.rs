@@ -53,6 +53,8 @@ pub struct SearchPage {
 #[derive(Debug, Deserialize)]
 pub struct Summary {
     pub title: String,
+    #[serde(rename = "type")]
+    pub page_type: Option<String>,
     pub description: Option<String>,
     pub extract: Option<String>,
     pub content_urls: Option<ContentUrls>,
