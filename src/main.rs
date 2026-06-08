@@ -1,21 +1,26 @@
 mod api;
 mod display;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use std::ffi::OsString;
 
 #[derive(Parser)]
-#[command(name = "wiki", about = "Search and read Wikipedia from the terminal")]
-#[command(args_conflicts_with_subcommands = true)]
+#[command(name = "wiki", about = "Search and read Wikipedia from the terminal", version)]
 struct Cli {
     /// Wikipedia language code (e.g. en, de, ja, fr)
     #[arg(short, long, default_value = "en", global = true)]
     lang: String,
 
+    /// Wikimedia project (wikipedia, wikiquote, wikinews, wiktionary) or base URL
+    #[arg(short, long, default_value = "wikipedia", global = true)]
+    site: String,
+
+    /// Output as JSON
+    #[arg(long, global = true)]
+    json: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
-
-    /// Article title or search query (tries page first, falls back to search)
-    query: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -43,21 +48,49 @@ enum Commands {
     },
     /// Show a random article summary
     Random,
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        shell: clap_complete::Shell,
+    },
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let client = api::Client::new(&cli.lang);
+
+    if cli.json {
+        colored::control::set_override(false);
+    }
+
+    let client = api::Client::new(&cli.lang, &cli.site);
 
     let result = match cli.command {
-        Some(Commands::Search { query, limit }) => cmd_search(&client, &query.join(" "), limit).await,
-        Some(Commands::Summary { title }) => cmd_summary(&client, &title.join(" ")).await,
-        Some(Commands::Page { title, width }) => cmd_page(&client, &title.join(" "), width).await,
-        Some(Commands::Random) => cmd_random(&client).await,
-        None if !cli.query.is_empty() => cmd_default(&client, &cli.query.join(" ")).await,
+        Some(Commands::Search { query, limit }) => {
+            cmd_search(&client, &query.join(" "), limit, cli.json).await
+        }
+        Some(Commands::Summary { title }) => {
+            cmd_summary(&client, &title.join(" "), cli.json).await
+        }
+        Some(Commands::Page { title, width }) => {
+            cmd_page(&client, &title.join(" "), width, cli.json).await
+        }
+        Some(Commands::Random) => cmd_random(&client, cli.json).await,
+        Some(Commands::Completions { shell }) => {
+            clap_complete::generate(shell, &mut Cli::command(), "wiki", &mut std::io::stdout());
+            Ok(())
+        }
+        Some(Commands::External(args)) => {
+            let query: String = args
+                .iter()
+                .map(|s| s.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            cmd_default(&client, &query, cli.json).await
+        }
         None => {
-            use clap::CommandFactory;
             let _ = Cli::command().print_help();
             Ok(())
         }
@@ -65,12 +98,48 @@ async fn main() {
 
     if let Err(e) = result {
         eprintln!("Error: {e}");
-        std::process::exit(1);
+        let code = if e
+            .downcast_ref::<api::ApiError>()
+            .map_or(false, |e| matches!(e, api::ApiError::NotFound(_)))
+        {
+            1
+        } else {
+            2
+        };
+        std::process::exit(code);
     }
 }
 
-async fn cmd_search(client: &api::Client, query: &str, limit: u32) -> Result<(), Box<dyn std::error::Error>> {
+fn summary_url(s: &api::Summary) -> Option<&str> {
+    s.content_urls
+        .as_ref()
+        .and_then(|u| u.desktop.as_ref())
+        .and_then(|d| d.page.as_deref())
+}
+
+async fn cmd_search(
+    client: &api::Client,
+    query: &str,
+    limit: u32,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let result = client.search(query, limit).await?;
+
+    if json {
+        let items: Vec<serde_json::Value> = result
+            .pages
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "title": p.title,
+                    "description": p.description,
+                    "excerpt": p.excerpt.as_ref().map(|e| display::strip_search_highlight(e)),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&items)?);
+        return Ok(());
+    }
 
     if result.pages.is_empty() {
         println!("No results for \"{query}\"");
@@ -89,39 +158,73 @@ async fn cmd_search(client: &api::Client, query: &str, limit: u32) -> Result<(),
     Ok(())
 }
 
-async fn cmd_summary(client: &api::Client, title: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_summary(
+    client: &api::Client,
+    title: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let s = client.summary(title).await?;
 
-    let url = s.content_urls
-        .as_ref()
-        .and_then(|u| u.desktop.as_ref())
-        .and_then(|d| d.page.as_deref());
+    if json {
+        let out = serde_json::json!({
+            "title": s.title,
+            "description": s.description,
+            "extract": s.extract,
+            "url": summary_url(&s),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
 
     display::print_summary(
         &s.title,
         s.description.as_deref(),
         s.extract.as_deref(),
-        url,
+        summary_url(&s),
     );
     Ok(())
 }
 
-async fn cmd_default(client: &api::Client, query: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_default(
+    client: &api::Client,
+    query: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     match client.summary_direct(query).await? {
-        Some(s) => show_page(client, &s, None).await,
-        None => cmd_search(client, query, 10).await,
+        Some(s) => show_page(client, &s, json).await,
+        None => cmd_search(client, query, 10, json).await,
     }
 }
 
-async fn cmd_page(client: &api::Client, title: &str, width: Option<usize>) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_page(
+    client: &api::Client,
+    title: &str,
+    _width: Option<usize>,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let s = client.summary(title).await?;
-    show_page(client, &s, width).await
+    show_page(client, &s, json).await
 }
 
-async fn show_page(client: &api::Client, summary: &api::Summary, width: Option<usize>) -> Result<(), Box<dyn std::error::Error>> {
-    let width = width.unwrap_or_else(display::term_width);
+async fn show_page(
+    client: &api::Client,
+    summary: &api::Summary,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let width = display::term_width();
     let html = client.page_html(&summary.title).await?;
     let rendered = display::render_html(&html, width);
+
+    if json {
+        let out = serde_json::json!({
+            "title": summary.title,
+            "description": summary.description,
+            "url": summary_url(summary),
+            "content": rendered,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
 
     use colored::Colorize;
     let mut output = format!("{}\n", summary.title.bold().blue());
@@ -131,11 +234,7 @@ async fn show_page(client: &api::Client, summary: &api::Summary, width: Option<u
     output.push('\n');
     output.push_str(&rendered);
 
-    let url = summary.content_urls
-        .as_ref()
-        .and_then(|u| u.desktop.as_ref())
-        .and_then(|d| d.page.as_deref());
-    if let Some(u) = url {
+    if let Some(u) = summary_url(summary) {
         output.push_str(&format!("\n{}", u.dimmed()));
     }
 
@@ -143,19 +242,28 @@ async fn show_page(client: &api::Client, summary: &api::Summary, width: Option<u
     Ok(())
 }
 
-async fn cmd_random(client: &api::Client) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_random(
+    client: &api::Client,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let s = client.random_summary().await?;
 
-    let url = s.content_urls
-        .as_ref()
-        .and_then(|u| u.desktop.as_ref())
-        .and_then(|d| d.page.as_deref());
+    if json {
+        let out = serde_json::json!({
+            "title": s.title,
+            "description": s.description,
+            "extract": s.extract,
+            "url": summary_url(&s),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
 
     display::print_summary(
         &s.title,
         s.description.as_deref(),
         s.extract.as_deref(),
-        url,
+        summary_url(&s),
     );
     Ok(())
 }

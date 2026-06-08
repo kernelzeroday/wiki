@@ -18,8 +18,7 @@ pub fn render_html(html: &str, width: usize) -> String {
 fn postprocess(text: &str) -> String {
     let text = strip_superscript_refs(text);
     let text = strip_ref_numbers(&text);
-    let text = strip_link_brackets(&text);
-    let text = strip_link_brackets(&text);
+    let text = style_links(&text);
     let text = flatten_tables(&text);
     text.lines()
         .filter(|line| !is_footnote_line(line))
@@ -72,7 +71,7 @@ fn flatten_tables(text: &str) -> String {
     result.join("\n")
 }
 
-fn strip_link_brackets(text: &str) -> String {
+fn style_links(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let bytes = text.as_bytes();
     let mut i = 0;
@@ -93,7 +92,9 @@ fn strip_link_brackets(text: &str) -> String {
                 }
             }
             if depth == 0 {
-                result.push_str(&text[content_start..i]);
+                let inner = &text[content_start..i];
+                let styled = style_links(inner);
+                result.push_str(&styled.underline().to_string());
                 i += 1;
             } else {
                 result.push_str(&text[open..i]);

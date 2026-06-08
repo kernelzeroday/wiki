@@ -4,7 +4,7 @@ use std::fmt;
 
 pub struct Client {
     http: reqwest::Client,
-    lang: String,
+    base: String,
 }
 
 #[derive(Debug)]
@@ -69,23 +69,21 @@ pub struct UrlSet {
 }
 
 impl Client {
-    pub fn new(lang: &str) -> Self {
+    pub fn new(lang: &str, site: &str) -> Self {
+        let base = if site.starts_with("http") {
+            site.trim_end_matches('/').to_string()
+        } else {
+            format!("https://{lang}.{site}.org")
+        };
         let http = reqwest::Client::builder()
-            .user_agent("wiki-cli/0.1 (https://github.com/kod; enktal@gmail.com)")
+            .user_agent("wiki-cli/0.1 (https://github.com/kernelzeroday/wiki)")
             .build()
             .expect("failed to create HTTP client");
-        Self {
-            http,
-            lang: lang.to_string(),
-        }
-    }
-
-    fn base(&self) -> String {
-        format!("https://{}.wikipedia.org", self.lang)
+        Self { http, base }
     }
 
     pub async fn search(&self, query: &str, limit: u32) -> Result<SearchResponse, reqwest::Error> {
-        let url = format!("{}/w/rest.php/v1/search/page", self.base());
+        let url = format!("{}/w/rest.php/v1/search/page", self.base);
         self.http
             .get(&url)
             .query(&[
@@ -100,7 +98,7 @@ impl Client {
 
     pub async fn summary_direct(&self, title: &str) -> Result<Option<Summary>, reqwest::Error> {
         let encoded = urlencoding::encode(title);
-        let url = format!("{}/api/rest_v1/page/summary/{encoded}", self.base());
+        let url = format!("{}/api/rest_v1/page/summary/{encoded}", self.base);
         let resp = self.http.get(&url).send().await?;
         if resp.status() == 404 {
             return Ok(None);
@@ -112,7 +110,6 @@ impl Client {
         if let Some(s) = self.summary_direct(title).await? {
             return Ok(s);
         }
-        // Title not found directly — try search to resolve casing/redirects
         let search = self.search(title, 1).await?;
         if let Some(page) = search.pages.first() {
             if let Some(s) = self.summary_direct(&page.title).await? {
@@ -124,12 +121,12 @@ impl Client {
 
     pub async fn page_html(&self, title: &str) -> Result<String, reqwest::Error> {
         let encoded = urlencoding::encode(title);
-        let url = format!("{}/api/rest_v1/page/html/{encoded}", self.base());
+        let url = format!("{}/api/rest_v1/page/html/{encoded}", self.base);
         self.http.get(&url).send().await?.text().await
     }
 
     pub async fn random_summary(&self) -> Result<Summary, ApiError> {
-        let url = format!("{}/api/rest_v1/page/random/summary", self.base());
+        let url = format!("{}/api/rest_v1/page/random/summary", self.base);
         Ok(self.http.get(&url).send().await?.json().await?)
     }
 }
