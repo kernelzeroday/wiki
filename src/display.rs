@@ -10,7 +10,6 @@ pub fn term_width() -> usize {
 
 pub fn render_html(html: &str, width: usize) -> String {
     let text = html2text::config::plain()
-        .no_table_borders()
         .string_from_read(html.as_bytes(), width)
         .unwrap_or_default();
     postprocess(&text)
@@ -21,11 +20,56 @@ fn postprocess(text: &str) -> String {
     let text = strip_ref_numbers(&text);
     let text = strip_link_brackets(&text);
     let text = strip_link_brackets(&text);
+    let text = flatten_tables(&text);
     text.lines()
         .filter(|line| !is_footnote_line(line))
         .map(|line| colorize_heading(line))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn is_box_drawing(c: char) -> bool {
+    ('\u{2500}'..='\u{257F}').contains(&c)
+}
+
+fn is_border_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty() && trimmed.chars().all(|c| is_box_drawing(c) || c.is_whitespace())
+}
+
+fn flatten_tables(text: &str) -> String {
+    let mut result: Vec<String> = Vec::new();
+    let mut prev_was_table = false;
+
+    for line in text.lines() {
+        if is_border_line(line) {
+            continue;
+        }
+
+        if line.contains('\u{2502}') {
+            let parts: Vec<&str> = line.split('\u{2502}').map(|s| s.trim()).collect();
+            let label = parts[0];
+            let values: Vec<&str> =
+                parts[1..].iter().filter(|s| !s.is_empty()).copied().collect();
+
+            if !label.is_empty() && !values.is_empty() {
+                result.push(format!("{}", label.dimmed()));
+                result.push(format!("  {}", values.join("  ")));
+            } else if !label.is_empty() {
+                result.push(format!("{}", label.dimmed()));
+            } else if !values.is_empty() {
+                result.push(format!("  {}", values.join("  ")));
+            }
+            prev_was_table = true;
+        } else {
+            if prev_was_table {
+                result.push(String::new());
+            }
+            result.push(line.to_string());
+            prev_was_table = false;
+        }
+    }
+    result.join("\n")
 }
 
 fn strip_link_brackets(text: &str) -> String {
