@@ -9,22 +9,77 @@ pub fn term_width() -> usize {
 }
 
 pub fn render_html(html: &str, width: usize) -> String {
-    let text = html2text::config::plain()
-        .string_from_read(html.as_bytes(), width)
+    use html2text::render::RichAnnotation;
+
+    let lines = html2text::config::rich()
+        .lines_from_read(html.as_bytes(), width)
         .unwrap_or_default();
+
+    let mut text = String::new();
+    for line in &lines {
+        let mut current_url: Option<&str> = None;
+        let mut link_buf = String::new();
+
+        for ts in line.tagged_strings() {
+            let url = ts.tag.iter().find_map(|a| match a {
+                RichAnnotation::Link(u) => Some(u.as_str()),
+                _ => None,
+            });
+
+            match (current_url, url) {
+                (None, None) => text.push_str(&ts.s),
+                (None, Some(u)) => {
+                    current_url = Some(u);
+                    link_buf.clear();
+                    link_buf.push_str(&ts.s);
+                }
+                (Some(prev), Some(u)) if prev == u => {
+                    link_buf.push_str(&ts.s);
+                }
+                (Some(prev), next) => {
+                    emit_link_marker(&mut text, prev, &link_buf);
+                    link_buf.clear();
+                    match next {
+                        Some(u) => {
+                            current_url = Some(u);
+                            link_buf.push_str(&ts.s);
+                        }
+                        None => {
+                            current_url = None;
+                            text.push_str(&ts.s);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(u) = current_url {
+            emit_link_marker(&mut text, u, &link_buf);
+        }
+        text.push('\n');
+    }
+
     postprocess(&text)
 }
 
 fn postprocess(text: &str) -> String {
     let text = strip_superscript_refs(text);
     let text = strip_ref_numbers(&text);
-    let text = style_links(&text);
+    let text = style_links(&text, &mut std::collections::HashSet::new());
     let text = flatten_tables(&text);
     text.lines()
         .filter(|line| !is_footnote_line(line))
         .map(|line| colorize_heading(line))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn emit_link_marker(text: &mut String, url: &str, display: &str) {
+    text.push('[');
+    text.push('\x01');
+    text.push_str(url);
+    text.push('\x01');
+    text.push_str(display);
+    text.push(']');
 }
 
 fn is_box_drawing(c: char) -> bool {
@@ -71,7 +126,7 @@ fn flatten_tables(text: &str) -> String {
     result.join("\n")
 }
 
-fn style_links(text: &str) -> String {
+fn style_links(text: &str, seen: &mut std::collections::HashSet<String>) -> String {
     let mut result = String::with_capacity(text.len());
     let bytes = text.as_bytes();
     let mut i = 0;
@@ -93,9 +148,25 @@ fn style_links(text: &str) -> String {
             }
             if depth == 0 {
                 let inner = &text[content_start..i];
-                let styled = style_links(inner);
-                result.push_str(&styled.underline().to_string());
                 i += 1;
+                if let Some(rest) = inner.strip_prefix('\x01') {
+                    if let Some(sep) = rest.find('\x01') {
+                        let url = &rest[..sep];
+                        let display = &rest[sep + 1..];
+                        let styled_display = style_links(display, seen);
+                        result.push_str(&styled_display.underline().to_string());
+                        if let Some(title) = wiki_title_from_url(url) {
+                            if !titles_match(&title, display.trim()) && seen.insert(url.to_string()) {
+                                result.push_str(&format!(" [{}]", title).dimmed().to_string());
+                            }
+                        }
+                    } else {
+                        result.push_str(&inner.underline().to_string());
+                    }
+                } else {
+                    let styled = style_links(inner, seen);
+                    result.push_str(&styled.underline().to_string());
+                }
             } else {
                 result.push_str(&text[open..i]);
             }
@@ -108,6 +179,41 @@ fn style_links(text: &str) -> String {
         }
     }
     result
+}
+
+fn wiki_title_from_url(url: &str) -> Option<String> {
+    let path = url.strip_prefix("./").or_else(|| {
+        url.find("/wiki/").map(|pos| &url[pos + 6..])
+    })?;
+    let path = path.split('#').next().unwrap_or(path);
+    if path.is_empty() {
+        return None;
+    }
+    let decoded = urlencoding::decode(path).unwrap_or_else(|_| path.into());
+    let title = decoded.replace('_', " ");
+    let dominated_by_namespace = title.starts_with("File:")
+        || title.starts_with("Category:")
+        || title.starts_with("Special:")
+        || title.starts_with("Wikipedia:")
+        || title.starts_with("Help:")
+        || title.starts_with("Template:")
+        || title.starts_with("Template talk:")
+        || title.starts_with("Talk:")
+        || title.starts_with("Portal:");
+    if dominated_by_namespace {
+        return None;
+    }
+    Some(title)
+}
+
+fn titles_match(link_title: &str, display: &str) -> bool {
+    let norm = |s: &str| {
+        s.chars()
+            .filter(|c| !c.is_whitespace())
+            .flat_map(|c| c.to_lowercase())
+            .collect::<String>()
+    };
+    norm(link_title) == norm(display)
 }
 
 fn strip_superscript_refs(text: &str) -> String {
